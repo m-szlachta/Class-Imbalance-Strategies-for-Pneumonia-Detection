@@ -3,6 +3,14 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision.io import decode_image
+from torchvision import transforms
+
+training_data_transformations = transforms.Compose(
+    [
+        transforms.Resize(224, 224),
+        transforms.Normalize(0.5, 0.5)
+    ]
+)
 
 class CustomImageDataset(Dataset):
     def __init__(self, data_file, transform=None, target_transform=None):
