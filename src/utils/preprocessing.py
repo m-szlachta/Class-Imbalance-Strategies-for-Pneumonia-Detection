@@ -4,6 +4,7 @@ from sklearn.model_selection import train_test_split
 import os
 
 DATA_PATH = "/home/michal/code/paper/data/chest_xray"
+LABEL_MAP = {"NORMAL": 0, "PNEUMONIA": 1}
 
 def create_dataframes(data_path:str):
     root = Path(data_path)
@@ -22,8 +23,9 @@ def create_dataframes(data_path:str):
 
     df_train = pd.DataFrame(train_rows)
     df_test = pd.DataFrame(test_rows)
-    df_train["encoded_label"] = pd.factorize(df_train["label"])[0] #encoding normal = 0, pneumonia = 1
-    df_test["encoded_label"] = pd.factorize(df_test["label"])[0] #encoding normal = 0, pneumonia = 1
+    df_train["encoded_label"] = pd.factorize(df_train["label"]).map(LABEL_MAP)
+    df_test["encoded_label"] = pd.factorize(df_test["label"]).map(LABEL_MAP)
+    
     return df_train, df_test
 
 def data_split(df, ratio = 0.1, random_state = 41):

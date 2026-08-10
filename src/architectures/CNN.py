@@ -2,7 +2,6 @@ import os
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
-from torchvision.io import decode_image
 from torchvision import transforms
 from torch import nn
 from PIL import Image
@@ -39,6 +38,17 @@ class CustomImageDataset(Dataset):
         if self.target_transform:
             label = self.target_transform(label)
         return image, label
+
+
+train_data = CustomImageDataset(data_file="data/data_csv/train.csv", transform=image_transformations)
+val_data = CustomImageDataset(data_file="data/data_csv/val.csv", transform=image_transformations)
+test_data = CustomImageDataset(data_file="data/data_csv/test.csv", transform=image_transformations)
+
+
+train_dataloader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True, num_workers=16, pin_memory=True, persistent_workers=True)
+val_dataloader = DataLoader(val_data, batch_size=BATCH_SIZE)
+test_dataloader = DataLoader(test_data, batch_size=BATCH_SIZE)
+
 
 class CNN(nn.Module):
     def __init__(self):
@@ -106,6 +116,22 @@ def train(dataloader, model, loss_fn, optimizer):
             loss, current = loss.item(), (batch + 1) * len(X)
             print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
 
+def validation(dataloader, model, loss_fn):
+    size = len(dataloader.dataset)
+    num_batches = len(dataloader)
+    model.eval()
+    vloss, vacc = 0, 0
+    with torch.no_grad():
+        for vinputs, vlabels in dataloader:
+            vinputs, vlabels = vinputs.to(DEVICE), vlabels.to(DEVICE).float()
+            voutputs = model(vinputs).squeeze(1)
+            vloss += loss_fn(voutputs, vlabels).item()
+            vacc += ((voutputs > 0).float() == vlabels).float().sum().item()
+    vloss /= num_batches
+    vacc /= size
+    print(f"Validation Error: \n  Accuracy: {vacc*100:.1f}%, Loss: {vloss:.4f}")
+    return vloss, vacc
+
 def test(dataloader, model, loss_fn):
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
@@ -122,22 +148,15 @@ def test(dataloader, model, loss_fn):
     print(f"Test Error: \n Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>8f} \n")
 
 
-train_data = CustomImageDataset(data_file="data/data_csv/train.csv", transform=image_transformations)
-val_data = CustomImageDataset(data_file="data/data_csv/val.csv", transform=image_transformations)
-test_data = CustomImageDataset(data_file="data/data_csv/test.csv", transform=image_transformations)
-
-train_dataloader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True, num_workers=16, pin_memory=True, persistent_workers=True)
-val_dataloader = DataLoader(val_data, batch_size=BATCH_SIZE)
-test_dataloader = DataLoader(test_data, batch_size=BATCH_SIZE)
-
 model = CNN().to(DEVICE)
 loss_fn = nn.BCEWithLogitsLoss()
-optimizer = torch.optim.Adam(model.parameters(), 0.0005)
+optimizer = torch.optim.Adam(model.parameters(), 0.0001)
 
 
 epochs = 20
 for t in range(epochs):
     print(f"Epoch {t+1}\n-------------------------------")
     train(train_dataloader, model, loss_fn, optimizer)
+    validation(val_dataloader, model, loss_fn)
     test(test_dataloader, model, loss_fn)
 print("Done!")
