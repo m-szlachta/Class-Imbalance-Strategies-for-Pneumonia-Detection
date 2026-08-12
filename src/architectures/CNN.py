@@ -101,8 +101,11 @@ class CNN(nn.Module):
 
 def train(dataloader, model, loss_fn, optimizer):
     size = len(dataloader.dataset)
+    num_batches = len(dataloader)
+    train_loss, train_acc = 0, 0
     model.train()
-    for batch, (X, y) in enumerate(dataloader):
+
+    for X, y in dataloader:
         X, y = X.to(DEVICE), y.to(DEVICE).float()
 
         pred = model(X).squeeze(1)
@@ -111,10 +114,12 @@ def train(dataloader, model, loss_fn, optimizer):
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-
-        if batch % 100 == 0:
-            loss, current = loss.item(), (batch + 1) * len(X)
-            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+        train_loss += loss_fn(pred, y).item()
+        train_acc += ((pred > 0).float() == y).float().sum().item()
+        
+    train_acc /= size
+    train_loss /= num_batches
+    print(f"Train: \n Accuracy: {train_acc*100:.2f}%, Loss {train_loss:.4f}")
 
 def validation(dataloader, model, loss_fn):
     size = len(dataloader.dataset)
@@ -127,26 +132,26 @@ def validation(dataloader, model, loss_fn):
             voutputs = model(vinputs).squeeze(1)
             vloss += loss_fn(voutputs, vlabels).item()
             vacc += ((voutputs > 0).float() == vlabels).float().sum().item()
+
     vloss /= num_batches
     vacc /= size
-    print(f"Validation Error: \n  Accuracy: {vacc*100:.1f}%, Loss: {vloss:.4f}")
+    print(f"Validation: \n  Accuracy: {vacc*100:.2f}%, Loss: {vloss:.4f}")
     return vloss, vacc
 
 def test(dataloader, model, loss_fn):
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     model.eval()
-    test_loss, correct = 0, 0
+    test_loss, test_acc = 0, 0
     with torch.no_grad():
         for X, y in dataloader:
             X, y = X.to(DEVICE), y.to(DEVICE).float()
             pred = model(X).squeeze(1)
             test_loss += loss_fn(pred, y).item()
-            correct += ((pred > 0).float() == y).float().sum().item()
+            test_acc += ((pred > 0).float() == y).float().sum().item()
     test_loss /= num_batches
-    correct /= size
-    print(f"Test Error: \n Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>8f} \n")
-
+    test_acc /= size
+    print(f"Test: \n Accuracy: {test_acc*100:.2f}%, Avg loss: {test_loss:.4f} \n")
 
 model = CNN().to(DEVICE)
 loss_fn = nn.BCEWithLogitsLoss()
