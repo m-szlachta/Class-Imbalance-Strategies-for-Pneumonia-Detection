@@ -1,10 +1,17 @@
 import os
+import sys
+from pathlib import Path
+
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from torch import nn
 from PIL import Image
+
+# run as a script, sys.path[0] is src/architectures, so put the repo root on it
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.utils.evaluation import MetricTracker
 
 BATCH_SIZE = 64
 DEVICE = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
@@ -55,26 +62,26 @@ class CNN(nn.Module):
         super().__init__()
 
         self.conv1 = nn.Sequential(
-            nn.Conv2d(in_channels=3, out_channels=32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.GroupNorm(2, 32),      # 32 ch, 2 groups (16 ch each)
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
+            nn.MaxPool2d(2, 2)
         )
         self.conv2 = nn.Sequential(
-            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.GroupNorm(4, 64),      # 64 ch, 4 groups
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
+            nn.MaxPool2d(2, 2)
         )
         self.conv3 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(128),
+            nn.GroupNorm(8, 128),     # 128 ch, 8 groups
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2, 2)
         )
         self.conv4 = nn.Sequential(
             nn.Conv2d(128, 256, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(256),
+            nn.GroupNorm(16, 256),    # 256 ch, 16 groups
             nn.ReLU(inplace=True),
         )
         self.classifier = nn.Sequential(
@@ -99,7 +106,7 @@ class CNN(nn.Module):
         return x
 
 
-def train(dataloader, model, loss_fn, optimizer):
+def train(dataloader, model, loss_fn, optimizer, tracker, epoch):
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     train_loss, train_acc = 0, 0
@@ -120,8 +127,9 @@ def train(dataloader, model, loss_fn, optimizer):
     train_acc /= size
     train_loss /= num_batches
     print(f"Train: \n Accuracy: {train_acc*100:.2f}%, Loss {train_loss:.4f}")
+    tracker.record("train", epoch, train_loss, train_acc)
 
-def validation(dataloader, model, loss_fn):
+def validation(dataloader, model, loss_fn, tracker, epoch):
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     model.eval()
@@ -136,9 +144,10 @@ def validation(dataloader, model, loss_fn):
     vloss /= num_batches
     vacc /= size
     print(f"Validation: \n  Accuracy: {vacc*100:.2f}%, Loss: {vloss:.4f}")
+    tracker.record("val", epoch, vloss, vacc)
     return vloss, vacc
 
-def test(dataloader, model, loss_fn):
+def test(dataloader, model, loss_fn, tracker, epoch):
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     model.eval()
@@ -152,6 +161,7 @@ def test(dataloader, model, loss_fn):
     test_loss /= num_batches
     test_acc /= size
     print(f"Test: \n Accuracy: {test_acc*100:.2f}%, Avg loss: {test_loss:.4f} \n")
+    tracker.record("test", epoch, test_loss, test_acc)
 
 model = CNN().to(DEVICE)
 loss_fn = nn.BCEWithLogitsLoss()
@@ -159,9 +169,11 @@ optimizer = torch.optim.Adam(model.parameters(), 0.0001)
 
 
 epochs = 20
+tracker = MetricTracker()
 for t in range(epochs):
     print(f"Epoch {t+1}\n-------------------------------")
-    train(train_dataloader, model, loss_fn, optimizer)
-    validation(val_dataloader, model, loss_fn)
-    test(test_dataloader, model, loss_fn)
-print("Done!")
+    train(train_dataloader, model, loss_fn, optimizer, tracker, t + 1)
+    validation(val_dataloader, model, loss_fn, tracker, t + 1)
+    test(test_dataloader, model, loss_fn, tracker, t + 1)
+
+tracker.plot("reports/curves.png")

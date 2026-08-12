@@ -10,3 +10,5 @@ wheels/
 .venv
 /notes
 /data
+/reports
+__init__.py
