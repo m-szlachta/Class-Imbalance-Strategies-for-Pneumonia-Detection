@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-
+import pandas as pd
 import torch
 from torch import nn
 
@@ -21,6 +21,9 @@ train_data = GPUDataset("data/data_csv/train.csv", "data/cache/train_224.npy", D
 val_data = GPUDataset("data/data_csv/val.csv", "data/cache/val_224.npy", DEVICE)
 test_data = GPUDataset("data/data_csv/test.csv", "data/cache/test_224.npy", DEVICE)
 
+n_pos = train_data.labels.sum()
+class_weight = (len(train_data) - n_pos) / n_pos
+CW = True
 
 class CNN(nn.Module):
     def __init__(self):
@@ -128,7 +131,12 @@ def test(data, model, loss_fn, tracker, epoch):
     tracker.record("test", epoch, test_loss, test_acc)
 
 model = CNN().to(DEVICE)
-loss_fn = nn.BCEWithLogitsLoss()
+
+if CW:
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=class_weight)
+else:
+    loss_fn = nn.BCEWithLogitsLoss()
+    
 lr = 0.001
 optimizer = torch.optim.Adam(model.parameters(), lr)
 
