@@ -1,61 +1,25 @@
-import os
 import sys
 from pathlib import Path
 
-import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
 from torch import nn
-from PIL import Image
 
 # run as a script, sys.path[0] is src/architectures, so put the repo root on it
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.utils.evaluation import MetricTracker
+from src.utils.dataset import GPUDataset
 from src.utils.callbacks import *
 
 BATCH_SIZE = 64
 DEVICE = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 print(f"Using {DEVICE} device")
 
-image_transformations = transforms.Compose(
-    [
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(0.5, 0.5)
-    ]
-)
+# input size is fixed at 224x224, so let cuDNN pick and cache the best algorithm once
+torch.backends.cudnn.benchmark = True
 
-class CustomImageDataset(Dataset):
-    def __init__(self, data_file, transform=None, target_transform=None):
-        self.data_csv = pd.read_csv(data_file)
-        self.img_labels = self.data_csv["encoded_label"]
-        self.img_dir = self.data_csv["image_path"]
-        self.transform = transform
-        self.target_transform = target_transform
-
-    def __len__(self):
-        return len(self.img_labels)
-
-    def __getitem__(self, idx):
-        img_path = self.img_dir.iloc[idx]
-        image = Image.open(img_path).convert("RGB")
-        label = self.img_labels.iloc[idx]
-        if self.transform:
-            image = self.transform(image)
-        if self.target_transform:
-            label = self.target_transform(label)
-        return image, label
-
-
-train_data = CustomImageDataset(data_file="data/data_csv/train.csv", transform=image_transformations)
-val_data = CustomImageDataset(data_file="data/data_csv/val.csv", transform=image_transformations)
-test_data = CustomImageDataset(data_file="data/data_csv/test.csv", transform=image_transformations)
-
-
-train_dataloader = DataLoader(train_data, batch_size=BATCH_SIZE, shuffle=True, num_workers=16, pin_memory=True, persistent_workers=True)
-val_dataloader = DataLoader(val_data, batch_size=BATCH_SIZE)
-test_dataloader = DataLoader(test_data, batch_size=BATCH_SIZE)
+train_data = GPUDataset("data/data_csv/train.csv", "data/cache/train_224.npy", DEVICE)
+val_data = GPUDataset("data/data_csv/val.csv", "data/cache/val_224.npy", DEVICE)
+test_data = GPUDataset("data/data_csv/test.csv", "data/cache/test_224.npy", DEVICE)
 
 
 class CNN(nn.Module):
@@ -107,61 +71,61 @@ class CNN(nn.Module):
         return x
 
 
-def train(dataloader, model, loss_fn, optimizer, tracker, epoch):
-    size = len(dataloader.dataset)
-    num_batches = len(dataloader)
-    train_loss, train_acc = 0, 0
+def train(data, model, loss_fn, optimizer, tracker, epoch):
+    size = len(data)
+    num_batches = data.num_batches(BATCH_SIZE)
+    # accumulate on the GPU; calling .item() per batch would sync on every step
+    train_loss = torch.zeros((), device=DEVICE)
+    train_acc = torch.zeros((), device=DEVICE)
     model.train()
 
-    for X, y in dataloader:
-        X, y = X.to(DEVICE), y.to(DEVICE).float()
-
+    for X, y in data.batches(BATCH_SIZE, shuffle=True):
         pred = model(X).squeeze(1)
         loss = loss_fn(pred, y)
 
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-        train_loss += loss_fn(pred, y).item()
-        train_acc += ((pred > 0).float() == y).float().sum().item()
-        
-    train_acc /= size
-    train_loss /= num_batches
+        train_loss += loss.detach()
+        train_acc += ((pred.detach() > 0).float() == y).float().sum()
+
+    train_acc = train_acc.item() / size
+    train_loss = train_loss.item() / num_batches
     print(f"Train: \n Accuracy: {train_acc*100:.2f}%, Loss {train_loss:.4f}")
     tracker.record("train", epoch, train_loss, train_acc)
 
-def validation(dataloader, model, loss_fn, tracker, epoch):
-    size = len(dataloader.dataset)
-    num_batches = len(dataloader)
+def validation(data, model, loss_fn, tracker, epoch):
+    size = len(data)
+    num_batches = data.num_batches(BATCH_SIZE)
     model.eval()
-    vloss, vacc = 0, 0
+    vloss = torch.zeros((), device=DEVICE)
+    vacc = torch.zeros((), device=DEVICE)
     with torch.no_grad():
-        for vinputs, vlabels in dataloader:
-            vinputs, vlabels = vinputs.to(DEVICE), vlabels.to(DEVICE).float()
+        for vinputs, vlabels in data.batches(BATCH_SIZE):
             voutputs = model(vinputs).squeeze(1)
-            vloss += loss_fn(voutputs, vlabels).item()
-            vacc += ((voutputs > 0).float() == vlabels).float().sum().item()
+            vloss += loss_fn(voutputs, vlabels)
+            vacc += ((voutputs > 0).float() == vlabels).float().sum()
 
-    vloss /= num_batches
-    vacc /= size
+    vloss = vloss.item() / num_batches
+    vacc = vacc.item() / size
     print(f"Validation: \n  Accuracy: {vacc*100:.2f}%, Loss: {vloss:.4f}")
     tracker.record("val", epoch, vloss, vacc)
 
     return vloss, vacc
 
-def test(dataloader, model, loss_fn, tracker, epoch):
-    size = len(dataloader.dataset)
-    num_batches = len(dataloader)
+def test(data, model, loss_fn, tracker, epoch):
+    size = len(data)
+    num_batches = data.num_batches(BATCH_SIZE)
     model.eval()
-    test_loss, test_acc = 0, 0
+    test_loss = torch.zeros((), device=DEVICE)
+    test_acc = torch.zeros((), device=DEVICE)
     with torch.no_grad():
-        for X, y in dataloader:
-            X, y = X.to(DEVICE), y.to(DEVICE).float()
+        for X, y in data.batches(BATCH_SIZE):
             pred = model(X).squeeze(1)
-            test_loss += loss_fn(pred, y).item()
-            test_acc += ((pred > 0).float() == y).float().sum().item()
-    test_loss /= num_batches
-    test_acc /= size
+            test_loss += loss_fn(pred, y)
+            test_acc += ((pred > 0).float() == y).float().sum()
+    test_loss = test_loss.item() / num_batches
+    test_acc = test_acc.item() / size
     print(f"Test: \n Accuracy: {test_acc*100:.2f}%, Avg loss: {test_loss:.4f} \n")
     tracker.record("test", epoch, test_loss, test_acc)
 
@@ -179,8 +143,12 @@ model_checkpoint = ModelCheckpoint("data/models/CNN_model.pt")
 
 for t in range(epochs):
     print(f"Epoch {t+1}\n-------------------------------")
-    train(train_dataloader, model, loss_fn, optimizer, tracker, t + 1)
-    vloss, _ = validation(val_dataloader, model, loss_fn, tracker, t + 1)
+    train(train_data, model, loss_fn, optimizer, tracker, t + 1)
+    vloss, _ = validation(val_data, model, loss_fn, tracker, t + 1)
+
+    # save and record before the early-stop break, so the final epoch is not skipped
+    model_checkpoint.save_model(model, vloss)
+    test(test_data, model, loss_fn, tracker, t + 1)
 
     if early_stop.on_epoch_end(vloss):
         break
@@ -188,9 +156,5 @@ for t in range(epochs):
     lr = reduce_lr.reduce(vloss, lr)
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
-
-    model_checkpoint.save_model(model, vloss)
-    
-    test(test_dataloader, model, loss_fn, tracker, t + 1)
 
 tracker.plot("reports/curves.png")
