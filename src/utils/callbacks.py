@@ -1,7 +1,7 @@
 import torch
 
 class EarlyStopping:
-    def __init__(self, patience):
+    def __init__(self, patience: int = 5):
         self.patience = patience
         self.counter = 0
         self.best_loss = None

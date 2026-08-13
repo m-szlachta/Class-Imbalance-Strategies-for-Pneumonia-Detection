@@ -12,6 +12,7 @@ from PIL import Image
 # run as a script, sys.path[0] is src/architectures, so put the repo root on it
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.utils.evaluation import MetricTracker
+from src.utils.callbacks import *
 
 BATCH_SIZE = 64
 DEVICE = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
@@ -145,6 +146,7 @@ def validation(dataloader, model, loss_fn, tracker, epoch):
     vacc /= size
     print(f"Validation: \n  Accuracy: {vacc*100:.2f}%, Loss: {vloss:.4f}")
     tracker.record("val", epoch, vloss, vacc)
+
     return vloss, vacc
 
 def test(dataloader, model, loss_fn, tracker, epoch):
@@ -165,15 +167,30 @@ def test(dataloader, model, loss_fn, tracker, epoch):
 
 model = CNN().to(DEVICE)
 loss_fn = nn.BCEWithLogitsLoss()
-optimizer = torch.optim.Adam(model.parameters(), 0.0001)
+lr = 0.001
+optimizer = torch.optim.Adam(model.parameters(), lr)
 
 
 epochs = 20
 tracker = MetricTracker()
+early_stop = EarlyStopping()
+reduce_lr = ReduceLROnPlateau()
+model_checkpoint = ModelCheckpoint("data/models/CNN_model.pt")
+
 for t in range(epochs):
     print(f"Epoch {t+1}\n-------------------------------")
     train(train_dataloader, model, loss_fn, optimizer, tracker, t + 1)
-    validation(val_dataloader, model, loss_fn, tracker, t + 1)
+    vloss, _ = validation(val_dataloader, model, loss_fn, tracker, t + 1)
+
+    if early_stop.on_epoch_end(vloss):
+        break
+
+    lr = reduce_lr.reduce(vloss, lr)
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
+
+    model_checkpoint.save_model(model, vloss)
+    
     test(test_dataloader, model, loss_fn, tracker, t + 1)
 
 tracker.plot("reports/curves.png")
