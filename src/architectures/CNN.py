@@ -73,7 +73,6 @@ class CNN(nn.Module):
 
 def train(data, model, loss_fn, optimizer, tracker, epoch):
     size = len(data)
-    num_batches = data.num_batches(BATCH_SIZE)
     # accumulate on the GPU; calling .item() per batch would sync on every step
     train_loss = torch.zeros((), device=DEVICE)
     train_acc = torch.zeros((), device=DEVICE)
@@ -86,27 +85,27 @@ def train(data, model, loss_fn, optimizer, tracker, epoch):
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-        train_loss += loss.detach()
+
+        train_loss += loss.detach() * X.size(0)
         train_acc += ((pred.detach() > 0).float() == y).float().sum()
 
     train_acc = train_acc.item() / size
-    train_loss = train_loss.item() / num_batches
+    train_loss = train_loss.item() / size
     print(f"Train: \n Accuracy: {train_acc*100:.2f}%, Loss {train_loss:.4f}")
     tracker.record("train", epoch, train_loss, train_acc)
 
 def validation(data, model, loss_fn, tracker, epoch):
     size = len(data)
-    num_batches = data.num_batches(BATCH_SIZE)
     model.eval()
     vloss = torch.zeros((), device=DEVICE)
     vacc = torch.zeros((), device=DEVICE)
     with torch.no_grad():
         for vinputs, vlabels in data.batches(BATCH_SIZE):
             voutputs = model(vinputs).squeeze(1)
-            vloss += loss_fn(voutputs, vlabels)
+            vloss += loss_fn(voutputs, vlabels) * vinputs.size(0)
             vacc += ((voutputs > 0).float() == vlabels).float().sum()
 
-    vloss = vloss.item() / num_batches
+    vloss = vloss.item() / size
     vacc = vacc.item() / size
     print(f"Validation: \n  Accuracy: {vacc*100:.2f}%, Loss: {vloss:.4f}")
     tracker.record("val", epoch, vloss, vacc)
@@ -115,16 +114,15 @@ def validation(data, model, loss_fn, tracker, epoch):
 
 def test(data, model, loss_fn, tracker, epoch):
     size = len(data)
-    num_batches = data.num_batches(BATCH_SIZE)
     model.eval()
     test_loss = torch.zeros((), device=DEVICE)
     test_acc = torch.zeros((), device=DEVICE)
     with torch.no_grad():
         for X, y in data.batches(BATCH_SIZE):
             pred = model(X).squeeze(1)
-            test_loss += loss_fn(pred, y)
+            test_loss += loss_fn(pred, y) * X.size(0)
             test_acc += ((pred > 0).float() == y).float().sum()
-    test_loss = test_loss.item() / num_batches
+    test_loss = test_loss.item() / size
     test_acc = test_acc.item() / size
     print(f"Test: \n Accuracy: {test_acc*100:.2f}%, Avg loss: {test_loss:.4f} \n")
     tracker.record("test", epoch, test_loss, test_acc)
@@ -146,7 +144,6 @@ for t in range(epochs):
     train(train_data, model, loss_fn, optimizer, tracker, t + 1)
     vloss, _ = validation(val_data, model, loss_fn, tracker, t + 1)
 
-    # save and record before the early-stop break, so the final epoch is not skipped
     model_checkpoint.save_model(model, vloss)
     test(test_data, model, loss_fn, tracker, t + 1)
 
