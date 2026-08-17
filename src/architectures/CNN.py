@@ -138,14 +138,14 @@ else:
     loss_fn = nn.BCEWithLogitsLoss()
     
 lr = 0.001
-optimizer = torch.optim.Adam(model.parameters(), lr)
+optimizer = torch.optim.Adam(model.parameters(), lr, weight_decay=1e-4)
 
-
+model_path = "data/models/CNN_model.pt"
 epochs = 20
 tracker = MetricTracker()
 early_stop = EarlyStopping()
 reduce_lr = ReduceLROnPlateau()
-model_checkpoint = ModelCheckpoint("data/models/CNN_model.pt")
+model_checkpoint = ModelCheckpoint(model_path)
 
 for t in range(epochs):
     print(f"Epoch {t+1}\n-------------------------------")
@@ -161,5 +161,10 @@ for t in range(epochs):
     lr = reduce_lr.reduce(vloss, lr)
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
+
+model.load_state_dict(torch.load(model_path, weights_only=True))
+print("TEST score:")
+test(test_data, model, loss_fn, tracker, t + 1)
+
 
 tracker.plot("reports/curves.png")
