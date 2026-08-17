@@ -7,6 +7,7 @@ from torch import nn
 # run as a script, sys.path[0] is src/architectures, so put the repo root on it
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.utils.evaluation import MetricTracker
+from src.utils.evaluation_metrics import PredictionCollector, format_metrics
 from src.utils.dataset import GPUDataset
 from src.utils.callbacks import *
 
@@ -23,7 +24,7 @@ test_data = GPUDataset("data/data_csv/test.csv", "data/cache/test_224.npy", DEVI
 
 n_pos = train_data.labels.sum()
 class_weight = (len(train_data) - n_pos) / n_pos
-CW = True
+CW = False
 
 class CNN(nn.Module):
     def __init__(self):
@@ -75,10 +76,8 @@ class CNN(nn.Module):
 
 
 def train(data, model, loss_fn, optimizer, tracker, epoch):
-    size = len(data)
-    # accumulate on the GPU; calling .item() per batch would sync on every step
-    train_loss = torch.zeros((), device=DEVICE)
-    train_acc = torch.zeros((), device=DEVICE)
+    # the collector keeps batches on the GPU; calling .item() per batch would sync every step
+    collector = PredictionCollector()
     model.train()
 
     for X, y in data.batches(BATCH_SIZE, shuffle=True):
@@ -89,46 +88,39 @@ def train(data, model, loss_fn, optimizer, tracker, epoch):
         optimizer.step()
         optimizer.zero_grad()
 
-        train_loss += loss.detach() * X.size(0)
-        train_acc += ((pred.detach() > 0).float() == y).float().sum()
+        collector.update(pred.detach(), y, loss.detach())
 
-    train_acc = train_acc.item() / size
-    train_loss = train_loss.item() / size
-    print(f"Train: \n Accuracy: {train_acc*100:.2f}%, Loss {train_loss:.4f}")
-    tracker.record("train", epoch, train_loss, train_acc)
+    metrics = collector.compute()
+    print(format_metrics(metrics, "Train"))
+    tracker.record("train", epoch, metrics["loss"], metrics)
 
 def validation(data, model, loss_fn, tracker, epoch):
-    size = len(data)
+    collector = PredictionCollector()
     model.eval()
-    vloss = torch.zeros((), device=DEVICE)
-    vacc = torch.zeros((), device=DEVICE)
     with torch.no_grad():
         for vinputs, vlabels in data.batches(BATCH_SIZE):
             voutputs = model(vinputs).squeeze(1)
-            vloss += loss_fn(voutputs, vlabels) * vinputs.size(0)
-            vacc += ((voutputs > 0).float() == vlabels).float().sum()
+            collector.update(voutputs, vlabels, loss_fn(voutputs, vlabels))
 
-    vloss = vloss.item() / size
-    vacc = vacc.item() / size
-    print(f"Validation: \n  Accuracy: {vacc*100:.2f}%, Loss: {vloss:.4f}")
-    tracker.record("val", epoch, vloss, vacc)
+    metrics = collector.compute()
+    print(format_metrics(metrics, "Validation"))
+    tracker.record("val", epoch, metrics["loss"], metrics)
 
-    return vloss, vacc
+    return metrics["loss"], metrics
 
 def test(data, model, loss_fn, tracker, epoch):
-    size = len(data)
+    collector = PredictionCollector()
     model.eval()
-    test_loss = torch.zeros((), device=DEVICE)
-    test_acc = torch.zeros((), device=DEVICE)
     with torch.no_grad():
         for X, y in data.batches(BATCH_SIZE):
             pred = model(X).squeeze(1)
-            test_loss += loss_fn(pred, y) * X.size(0)
-            test_acc += ((pred > 0).float() == y).float().sum()
-    test_loss = test_loss.item() / size
-    test_acc = test_acc.item() / size
-    print(f"Test: \n Accuracy: {test_acc*100:.2f}%, Avg loss: {test_loss:.4f} \n")
-    tracker.record("test", epoch, test_loss, test_acc)
+            collector.update(pred, y, loss_fn(pred, y))
+
+    metrics = collector.compute()
+    print(format_metrics(metrics, "Test"), "\n")
+    tracker.record("test", epoch, metrics["loss"], metrics)
+
+    return metrics
 
 model = CNN().to(DEVICE)
 
@@ -167,4 +159,4 @@ print("TEST score:")
 test(test_data, model, loss_fn, tracker, t + 1)
 
 
-tracker.plot("reports/curves.png")
+tracker.plot("reports/curves_imbalanced.png", metrics=["accuracy", "auroc", "auprc"])
