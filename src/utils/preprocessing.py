@@ -67,6 +67,22 @@ def data_split(df, ratio = 0.1, random_state = 41):
 
     return df_train, df_val
 
+def undersample(df_train, random_state = 41):
+    """Drop random majority-class images so both classes have the same count."""
+    counts = df_train["encoded_label"].value_counts()
+    n_keep = counts.min()
+
+    kept = [
+        group.sample(n=n_keep, random_state=random_state)
+        for _, group in df_train.groupby("encoded_label")
+    ]
+
+    return (
+        pd.concat(kept)
+        .sample(frac=1, random_state=random_state)
+        .reset_index(drop=True)
+    )
+
 def save_to_csv(dataframes: dict, folder_path: str):
     os.makedirs(folder_path, exist_ok=True)
     for name, dataframe in dataframes.items():
@@ -75,10 +91,11 @@ def save_to_csv(dataframes: dict, folder_path: str):
 
 df_train, df_test = create_dataframes(DATA_PATH)
 df_train, df_val = data_split(df_train)
+df_train = undersample(df_train)
 
 splits = {"train": df_train, "val": df_val, "test": df_test}
 
 save_to_csv(
     dataframes=splits,
-    folder_path="/home/michal/code/paper/data/data_csv",
+    folder_path="/home/michal/code/paper/data/data_csv_undersampled",
 )

@@ -18,7 +18,7 @@ print(f"Using {DEVICE} device")
 # input size is fixed at 224x224, so let cuDNN pick and cache the best algorithm once
 torch.backends.cudnn.benchmark = True
 
-train_data = GPUDataset("data/data_csv/train.csv", "data/cache/train_224.npy", DEVICE)
+train_data = GPUDataset("/home/michal/code/paper/data/data_csv_undersampled/train.csv", "data/cache/train_224.npy", DEVICE)
 val_data = GPUDataset("data/data_csv/val.csv", "data/cache/val_224.npy", DEVICE)
 test_data = GPUDataset("data/data_csv/test.csv", "data/cache/test_224.npy", DEVICE)
 
