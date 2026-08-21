@@ -7,7 +7,7 @@ from torch import nn
 # run as a script, sys.path[0] is src/architectures, so put the repo root on it
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.utils.evaluation import MetricTracker
-from src.utils.evaluation_metrics import PredictionCollector, format_metrics
+from src.utils.evaluation_metrics import PredictionCollector, format_metrics, sweep_threshold
 from src.utils.dataset import GPUDataset
 from src.utils.callbacks import *
 
@@ -18,13 +18,17 @@ print(f"Using {DEVICE} device")
 # input size is fixed at 224x224, so let cuDNN pick and cache the best algorithm once
 torch.backends.cudnn.benchmark = True
 
-train_data = GPUDataset("/home/michal/code/paper/data/data_csv_undersampled/train.csv", "data/cache/train_224.npy", DEVICE)
-val_data = GPUDataset("data/data_csv/val.csv", "data/cache/val_224.npy", DEVICE)
-test_data = GPUDataset("data/data_csv/test.csv", "data/cache/test_224.npy", DEVICE)
+# each split variant caches under its own name, so pointing DATA_DIR at an
+# oversampled or undersampled split builds that split's cache rather than reusing another's
+DATA_DIR = "data/data_csv"
+
+train_data = GPUDataset(f"{DATA_DIR}/train.csv", DEVICE)
+val_data = GPUDataset(f"{DATA_DIR}/val.csv", DEVICE)
+test_data = GPUDataset(f"{DATA_DIR}/test.csv", DEVICE)
 
 n_pos = train_data.labels.sum()
 class_weight = (len(train_data) - n_pos) / n_pos
-CW = False
+CW = True
 
 class CNN(nn.Module):
     def __init__(self):
@@ -155,8 +159,12 @@ for t in range(epochs):
         param_group["lr"] = lr
 
 model.load_state_dict(torch.load(model_path, weights_only=True))
+
+best = sweep_threshold(val_data, model, "reports_cw/threshold_sweep_cw")
+print(f"Best validation threshold: {best['threshold']:.2f} (accuracy {best['accuracy']:.4f})")
+
 print("TEST score:")
 test(test_data, model, loss_fn, tracker, t + 1)
 
 
-tracker.plot("reports/curves_imbalanced.png", metrics=["accuracy", "auroc", "auprc"])
+tracker.plot("reports_cw/curves_cw.png", metrics=["accuracy", "auroc", "auprc"])

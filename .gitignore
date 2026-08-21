@@ -9,6 +9,6 @@ wheels/
 # Virtual environments
 .venv
 /notes
-/data
-/reports
+data*/
+reports*/
 __init__.py

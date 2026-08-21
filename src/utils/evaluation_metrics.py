@@ -8,7 +8,15 @@ change how well the model separates the classes, so the threshold-free scores (a
 are the ones that say whether a method actually helped.
 """
 
+import math
+import os
+
+import matplotlib
+
+matplotlib.use("Agg")  # no display needed, we only ever write files
+import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.metrics import (
     average_precision_score,
@@ -127,17 +135,21 @@ class PredictionCollector:
             weighted = loss.detach() * logits.size(0)
             self.loss_total = weighted if self.loss_total is None else self.loss_total + weighted
 
-    def compute(self, threshold: float = 0.0) -> dict:
-        if not self.logits:
-            raise ValueError("nothing to compute, update() was never called")
+    def tensors(self):
+        """The whole split as one (logits, labels) pair, still on the device.
 
+        Scoring the same predictions at many thresholds needs them concatenated once rather
+        than per call, so the sweep reaches for this instead of compute().
+        """
+        if not self.logits:
+            raise ValueError("nothing to collect, update() was never called")
+
+        return torch.cat(self.logits), torch.cat(self.labels)
+
+    def compute(self, threshold: float = 0.0) -> dict:
+        logits, labels = self.tensors()
         loss = None if self.loss_total is None else self.loss_total.item() / self.count
-        return compute_metrics(
-            torch.cat(self.logits),
-            torch.cat(self.labels),
-            threshold=threshold,
-            loss=loss,
-        )
+        return compute_metrics(logits, labels, threshold=threshold, loss=loss)
 
 
 def format_metrics(metrics: dict, phase: str) -> str:
@@ -171,3 +183,115 @@ def format_metrics(metrics: dict, phase: str) -> str:
             lines.append(f"    {name:{width}}  {row[0]:>14}  {row[1]:>14}")
 
     return "\n".join(lines)
+
+
+# the sweep reports the threshold-dependent metrics only; auroc/auprc do not move with the cut
+_SWEEP_KEYS = (
+    "threshold",
+    "accuracy",
+    "balanced_accuracy",
+    "f1",
+    "mcc",
+    "sensitivity",
+    "specificity",
+    "tn",
+    "fp",
+    "fn",
+    "tp",
+)
+
+# mcc is the one curve that runs negative, so the shared axis has to reach -1
+_SWEEP_CURVES = ("accuracy", "balanced_accuracy", "f1", "mcc")
+
+
+def _probability_to_logit(probability: float) -> float:
+    """The logit cut matching a probability cut.
+
+    compute_metrics thresholds raw logits, so a probability grid has to be mapped through the
+    inverse sigmoid. The two ends are exact rather than a log(0): a cut at 0 predicts every
+    sample PNEUMONIA, a cut at 1 predicts every sample NORMAL.
+    """
+    if probability <= 0.0:
+        return -math.inf
+    if probability >= 1.0:
+        return math.inf
+    return math.log(probability / (1.0 - probability))
+
+
+def sweep_metrics(logits, labels, step: float = 0.01) -> list:
+    """Every metric at every probability threshold from 0 to 1.
+
+    Returns one dict per threshold -- a compute_metrics result with the probability cut added
+    as "threshold".
+    """
+    # the half-step pad includes 1.0 without letting float drift decide
+    grid = np.arange(0.0, 1.0 + step / 2, step)
+    digits = max(0, -int(math.floor(math.log10(step))))
+
+    rows = []
+    for probability in grid:
+        probability = round(float(probability), digits)
+        metrics = compute_metrics(logits, labels, threshold=_probability_to_logit(probability))
+        metrics["threshold"] = probability
+        rows.append(metrics)
+
+    return rows
+
+
+def sweep_threshold(data, model, save_prefix: str, batch_size: int = 64, step: float = 0.01) -> dict:
+    """Score a trained model at every threshold on one split, and write the plot and the table.
+
+    Meant to be called on the validation set after the best checkpoint is reloaded. Inference
+    runs once; the 101 thresholds then re-score the same logits. Writes "{save_prefix}.png"
+    and "{save_prefix}.csv" and returns the row with the best accuracy.
+    """
+    collector = PredictionCollector()
+    model.eval()
+    with torch.no_grad():
+        for X, y in data.batches(batch_size):
+            collector.update(model(X).squeeze(1), y)
+
+    logits, labels = collector.tensors()
+    rows = sweep_metrics(logits, labels, step=step)
+    best = max(rows, key=lambda row: row["accuracy"])
+
+    directory = os.path.dirname(save_prefix)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    csv_path = f"{save_prefix}.csv"
+    pd.DataFrame(rows)[list(_SWEEP_KEYS)].to_csv(csv_path, index=False, float_format="%.4f")
+    print(f"Saved threshold table to {csv_path}")
+
+    thresholds = [row["threshold"] for row in rows]
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for name in _SWEEP_CURVES:
+        ax.plot(thresholds, [row[name] for row in rows], label=name.replace("_", " "))
+
+    ax.axvline(
+        best["threshold"],
+        color="black",
+        linestyle="--",
+        linewidth=1,
+        label=f"best acc {best['accuracy']:.4f} @ {best['threshold']:.2f}",
+    )
+    ax.axhline(0, color="black", linewidth=0.8, alpha=0.4)
+    # mcc can reach -1 but rarely does, so the floor follows the data rather than the bound
+    lowest = min(min(row[name] for row in rows) for name in _SWEEP_CURVES)
+    ax.set(
+        xlabel="threshold (probability)",
+        ylabel="score",
+        title="Threshold sweep (validation)",
+        xlim=(0, 1),
+        ylim=(min(0.0, lowest) - 0.05, 1.05),
+    )
+    ax.grid(alpha=0.3)
+    ax.legend(loc="lower center")
+
+    fig.tight_layout()
+    plot_path = f"{save_prefix}.png"
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved threshold sweep to {plot_path}")
+
+    return best
