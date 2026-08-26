@@ -20,7 +20,9 @@ torch.backends.cudnn.benchmark = True
 
 # each split variant caches under its own name, so pointing DATA_DIR at an
 # oversampled or undersampled split builds that split's cache rather than reusing another's
-DATA_DIR = "data/data_csv"
+DATA_DIR = "data_imbalanced/normal_minority_oversampled_combined"
+
+DATA_OUT_DIR = "reports/reports_imbalanced_oversampled_combined"
 
 train_data = GPUDataset(f"{DATA_DIR}/train.csv", DEVICE)
 val_data = GPUDataset(f"{DATA_DIR}/val.csv", DEVICE)
@@ -133,10 +135,10 @@ if CW:
 else:
     loss_fn = nn.BCEWithLogitsLoss()
     
-lr = 0.001
+lr = 0.0001
 optimizer = torch.optim.Adam(model.parameters(), lr, weight_decay=1e-4)
 
-model_path = "data/models/CNN_model.pt"
+model_path = f"{DATA_OUT_DIR}/CNN_model.pt"
 epochs = 20
 tracker = MetricTracker()
 early_stop = EarlyStopping()
@@ -160,11 +162,11 @@ for t in range(epochs):
 
 model.load_state_dict(torch.load(model_path, weights_only=True))
 
-best = sweep_threshold(val_data, model, "reports_cw/threshold_sweep_cw")
+best = sweep_threshold(val_data, model, f"{DATA_OUT_DIR}threshold_sweep")
 print(f"Best validation threshold: {best['threshold']:.2f} (accuracy {best['accuracy']:.4f})")
 
 print("TEST score:")
 test(test_data, model, loss_fn, tracker, t + 1)
 
 
-tracker.plot("reports_cw/curves_cw.png", metrics=["accuracy", "auroc", "auprc"])
+tracker.plot(f"{DATA_OUT_DIR}curves.png", metrics=["accuracy", "auroc", "auprc"])

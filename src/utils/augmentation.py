@@ -189,6 +189,10 @@ if __name__ == "__main__":
     parser.add_argument("strategy", choices=sorted(STRATEGIES))
     parser.add_argument("--csv-dir", default="data/data_csv")
     parser.add_argument("--image-dir", default="data/augmented")
+    parser.add_argument(
+        "--out-dir",
+        help="where to write the split CSVs (default: data/data_csv_oversampled_<strategy>)",
+    )
     parser.add_argument("--seed", type=int, default=41)
     parser.add_argument("--workers", type=int, default=10)
     parser.add_argument("--artifact-control", action="store_true")
@@ -201,7 +205,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     suffix = "_control" if args.artifact_control else ""
-    out_dir = f"data/data_csv_oversampled_{args.strategy}{suffix}"
+    out_dir = args.out_dir or f"data/data_csv_oversampled_{args.strategy}{suffix}"
     os.makedirs(out_dir, exist_ok=True)
 
     df_train = oversample(

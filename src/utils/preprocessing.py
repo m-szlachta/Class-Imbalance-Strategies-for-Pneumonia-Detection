@@ -89,13 +89,14 @@ def save_to_csv(dataframes: dict, folder_path: str):
         dataframe.to_csv(f"{folder_path}/{name}.csv", index=False)
 
 
-df_train, df_test = create_dataframes(DATA_PATH)
-df_train, df_val = data_split(df_train)
-df_train = undersample(df_train)
+if __name__ == "__main__":
+    df_train, df_test = create_dataframes(DATA_PATH)
+    df_train, df_val = data_split(df_train)
+    df_train = undersample(df_train)
 
-splits = {"train": df_train, "val": df_val, "test": df_test}
+    splits = {"train": df_train, "val": df_val, "test": df_test}
 
-save_to_csv(
-    dataframes=splits,
-    folder_path="/home/michal/code/paper/data/data_csv_undersampled",
-)
+    save_to_csv(
+        dataframes=splits,
+        folder_path="/home/michal/code/paper/data/data_csv_undersampled",
+    )

@@ -12,3 +12,5 @@ wheels/
 data*/
 reports*/
 __init__.py
+.claude
+CLAUDE.md
