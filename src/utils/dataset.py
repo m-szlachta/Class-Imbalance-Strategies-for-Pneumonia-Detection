@@ -21,6 +21,24 @@ from PIL import Image
 
 IMAGE_SIZE = 224
 CACHE_DIR = "data/cache"
+
+# Each backbone gets the input convention its weights were trained under -- feeding one
+# backbone the other's tensors would confound the pretraining comparison with a preprocessing
+# mismatch. Held constant across the imbalance cells within a backbone, so those stay comparable.
+#
+#   symmetric  the custom CNN: /127.5 - 1 -> [-1, 1], the one cached channel expanded to 3
+#   imagenet   torchvision's DenseNet121: /255 then (x - mean) / std, 3 channels
+#
+# A TorchXRayVision arm would need a third mode, and more than a mode: its range is
+# (2 * x/maxval - 1) * 1024 -> [-1024, 1024] on a *single* channel, and its canonical geometry
+# is XRayCenterCrop (crop the long side square) then resize, where _load below resizes straight
+# to 224x224 without preserving the aspect ratio. That arm needs its own cache, so it is not
+# added here as a scaling-only mode that would silently get the geometry wrong.
+NORMALIZATIONS = ("symmetric", "imagenet")
+
+# torchvision.models.DenseNet121_Weights.IMAGENET1K_V1.transforms()
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 # the x-rays are single-channel (a few are stored as RGB with identical channels),
 # so we cache one channel and expand to three at batch time
 CACHE_CHANNELS = 1
@@ -79,7 +97,18 @@ class GPUDataset:
     """The whole split, resident in VRAM. Batches are sliced on-device, so there is no
     per-epoch host work and no DataLoader."""
 
-    def __init__(self, csv_path: str, device, cache_path: str = None, size: int = IMAGE_SIZE):
+    def __init__(
+        self,
+        csv_path: str,
+        device,
+        cache_path: str = None,
+        size: int = IMAGE_SIZE,
+        normalization: str = "symmetric",
+    ):
+        if normalization not in NORMALIZATIONS:
+            raise ValueError(f"normalization must be one of {NORMALIZATIONS}, got {normalization!r}")
+
+        self.normalization = normalization
         cache_path = build_cache(csv_path, cache_path, size)
         labels = pd.read_csv(csv_path)["encoded_label"].values
         images = np.load(cache_path)
@@ -95,6 +124,12 @@ class GPUDataset:
         self.images = torch.from_numpy(images).to(device)
         self.labels = torch.tensor(labels, device=device).float()
 
+        # [1, 3, 1, 1] so a [B, 1, H, W] batch broadcasts against them straight to [B, 3, H, W]:
+        # the channel expand and the standardisation are then one op and one allocation
+        if normalization == "imagenet":
+            self.mean = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
+            self.std = torch.tensor(IMAGENET_STD, device=device).view(1, 3, 1, 1)
+
     def __len__(self):
         return len(self.labels)
 
@@ -107,6 +142,16 @@ class GPUDataset:
 
         for start in range(0, len(self), batch_size):
             index = order[start : start + batch_size]
-            # reproduces ToTensor() (/255) followed by Normalize(0.5, 0.5)
-            images = self.images[index].float().div_(127.5).sub_(1.0)
-            yield images.unsqueeze(1).expand(-1, 3, -1, -1), self.labels[index]
+
+            if self.normalization == "imagenet":
+                # ToTensor() (/255) then Normalize(IMAGENET_MEAN, IMAGENET_STD). The broadcast
+                # allocates the 3-channel result; an in-place write into an expand() view would
+                # be writing three times through the same memory
+                images = self.images[index].float().div_(255.0).unsqueeze(1)
+                images = (images - self.mean) / self.std
+            else:
+                # reproduces ToTensor() (/255) followed by Normalize(0.5, 0.5)
+                images = self.images[index].float().div_(127.5).sub_(1.0)
+                images = images.unsqueeze(1).expand(-1, 3, -1, -1)
+
+            yield images, self.labels[index]
