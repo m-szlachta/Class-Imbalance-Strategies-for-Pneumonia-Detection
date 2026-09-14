@@ -49,6 +49,7 @@ class ExperimentConfig:
     data_dir: str
     cw: bool
     normalization: str = "symmetric"
+    geometry: str = "squash"
     seeds: tuple = (0, 1, 2, 3, 4)
     deterministic: bool = True
     epochs: int = 20
@@ -248,7 +249,12 @@ def run_experiment(build_model, config: ExperimentConfig) -> Path:
 
     # the decode is RNG-free, so the splits are loaded once and shared by every seed
     splits = tuple(
-        GPUDataset(f"{config.data_dir}/{name}.csv", device, normalization=config.normalization)
+        GPUDataset(
+            f"{config.data_dir}/{name}.csv",
+            device,
+            normalization=config.normalization,
+            geometry=config.geometry,
+        )
         for name in ("train", "val", "test")
     )
     train_data, val_data, test_data = splits
@@ -268,6 +274,7 @@ def run_experiment(build_model, config: ExperimentConfig) -> Path:
                 "model_name": config.model_name,
                 "data_dir": config.data_dir,
                 "normalization": config.normalization,
+                "geometry": config.geometry,
                 "class_weighting": config.cw,
                 "class_weight": float(class_weight),
                 "seeds": list(config.seeds),

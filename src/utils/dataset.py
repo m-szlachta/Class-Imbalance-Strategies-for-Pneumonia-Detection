@@ -28,13 +28,19 @@ CACHE_DIR = "data/cache"
 #
 #   symmetric  the custom CNN: /127.5 - 1 -> [-1, 1], the one cached channel expanded to 3
 #   imagenet   torchvision's DenseNet121: /255 then (x - mean) / std, 3 channels
+#   xrv        TorchXRayVision: xrv.utils.normalize, (2 * x/255 - 1) * 1024 -> [-1024, 1024],
+#              i.e. symmetric x 1024, on a *single* channel -- xrv.models.DenseNet defaults to
+#              in_channels=1 and ships a warn_normalization() that fires outside that band
+NORMALIZATIONS = ("symmetric", "imagenet", "xrv")
+
+# How an image is made square before the resize. Unlike normalisation this is baked into the
+# pixels, so each geometry keeps its own cache file rather than being applied at batch time.
 #
-# A TorchXRayVision arm would need a third mode, and more than a mode: its range is
-# (2 * x/maxval - 1) * 1024 -> [-1024, 1024] on a *single* channel, and its canonical geometry
-# is XRayCenterCrop (crop the long side square) then resize, where _load below resizes straight
-# to 224x224 without preserving the aspect ratio. That arm needs its own cache, so it is not
-# added here as a scaling-only mode that would silently get the geometry wrong.
-NORMALIZATIONS = ("symmetric", "imagenet")
+#   squash       resize straight to size x size, ignoring the aspect ratio
+#   center_crop  xrv.datasets.XRayCenterCrop: crop the long side to a centred square first.
+#                The TorchXRayVision weights were trained this way, so its arm uses it; sharing
+#                the squashed cache would feed that backbone geometry it has never seen
+GEOMETRIES = ("squash", "center_crop")
 
 # torchvision.models.DenseNet121_Weights.IMAGENET1K_V1.transforms()
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -45,20 +51,31 @@ CACHE_CHANNELS = 1
 
 
 def _load(args):
-    path, size = args
-    image = Image.open(path).convert("L").resize((size, size), Image.BILINEAR)
-    return np.asarray(image, dtype=np.uint8)
+    path, size, geometry = args
+    image = Image.open(path).convert("L")
+
+    if geometry == "center_crop":
+        # xrv.datasets.XRayCenterCrop.crop_center, in PIL's (left, top, right, bottom) box
+        width, height = image.size
+        crop = min(width, height)
+        left = width // 2 - crop // 2
+        top = height // 2 - crop // 2
+        image = image.crop((left, top, left + crop, top + crop))
+
+    return np.asarray(image.resize((size, size), Image.BILINEAR), dtype=np.uint8)
 
 
-def cache_path_for(csv_path: str, size: int = IMAGE_SIZE) -> str:
+def cache_path_for(csv_path: str, size: int = IMAGE_SIZE, geometry: str = "squash") -> str:
     """The cache file belonging to csv_path.
 
     The split variants all name their file train.csv, so it is the parent directory
     (data_csv, data_csv_oversampled_geometric, ...) that tells them apart; both go in
-    the name, along with the size, which changes the pixels a cache holds.
+    the name, along with the size and the geometry, which change the pixels a cache holds.
+    The default geometry stays unsuffixed, so the caches built before it existed remain valid.
     """
     csv = Path(csv_path)
-    return os.path.join(CACHE_DIR, f"{csv.parent.name}_{csv.stem}_{size}.npy")
+    suffix = "" if geometry == "squash" else f"_{geometry}"
+    return os.path.join(CACHE_DIR, f"{csv.parent.name}_{csv.stem}_{size}{suffix}.npy")
 
 
 def _is_current(cache_path: str, csv_path: str, rows: int, size: int) -> bool:
@@ -76,16 +93,22 @@ def _is_current(cache_path: str, csv_path: str, rows: int, size: int) -> bool:
     return np.load(cache_path, mmap_mode="r").shape == (rows, size, size)
 
 
-def build_cache(csv_path: str, cache_path: str = None, size: int = IMAGE_SIZE, workers: int = 10) -> str:
+def build_cache(
+    csv_path: str,
+    cache_path: str = None,
+    size: int = IMAGE_SIZE,
+    geometry: str = "squash",
+    workers: int = 10,
+) -> str:
     """Decode every image named in csv_path into a uint8 [N, size, size] .npy cache."""
-    cache_path = cache_path or cache_path_for(csv_path, size)
+    cache_path = cache_path or cache_path_for(csv_path, size, geometry)
     paths = pd.read_csv(csv_path)["image_path"].tolist()
 
     if _is_current(cache_path, csv_path, len(paths), size):
         return cache_path
 
     with ProcessPoolExecutor(workers) as pool:
-        images = np.stack(list(pool.map(_load, ((p, size) for p in paths), chunksize=32)))
+        images = np.stack(list(pool.map(_load, ((p, size, geometry) for p in paths), chunksize=32)))
 
     os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
     np.save(cache_path, images)
@@ -104,12 +127,16 @@ class GPUDataset:
         cache_path: str = None,
         size: int = IMAGE_SIZE,
         normalization: str = "symmetric",
+        geometry: str = "squash",
     ):
         if normalization not in NORMALIZATIONS:
             raise ValueError(f"normalization must be one of {NORMALIZATIONS}, got {normalization!r}")
+        if geometry not in GEOMETRIES:
+            raise ValueError(f"geometry must be one of {GEOMETRIES}, got {geometry!r}")
 
         self.normalization = normalization
-        cache_path = build_cache(csv_path, cache_path, size)
+        self.geometry = geometry
+        cache_path = build_cache(csv_path, cache_path, size, geometry)
         labels = pd.read_csv(csv_path)["encoded_label"].values
         images = np.load(cache_path)
 
@@ -149,6 +176,10 @@ class GPUDataset:
                 # be writing three times through the same memory
                 images = self.images[index].float().div_(255.0).unsqueeze(1)
                 images = (images - self.mean) / self.std
+            elif self.normalization == "xrv":
+                # xrv.utils.normalize: (2 * x/255 - 1) * 1024. One channel, not three --
+                # xrv.models.DenseNet is built with in_channels=1
+                images = self.images[index].float().div_(127.5).sub_(1.0).mul_(1024.0).unsqueeze(1)
             else:
                 # reproduces ToTensor() (/255) followed by Normalize(0.5, 0.5)
                 images = self.images[index].float().div_(127.5).sub_(1.0)
