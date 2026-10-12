@@ -92,11 +92,13 @@ def save_to_csv(dataframes: dict, folder_path: str):
 if __name__ == "__main__":
     df_train, df_test = create_dataframes(DATA_PATH)
     df_train, df_val = data_split(df_train)
-    df_train = undersample(df_train)
 
-    splits = {"train": df_train, "val": df_val, "test": df_test}
-
+    # split once, so the baseline and the undersampled variant share val and test
     save_to_csv(
-        dataframes=splits,
+        dataframes={"train": df_train, "val": df_val, "test": df_test},
+        folder_path="/home/michal/code/paper/data/data_csv",
+    )
+    save_to_csv(
+        dataframes={"train": undersample(df_train), "val": df_val, "test": df_test},
         folder_path="/home/michal/code/paper/data/data_csv_undersampled",
     )
